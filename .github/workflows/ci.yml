@@ -1,0 +1,31 @@
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+jobs:
+  check: # the required status check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with: { node-version-file: .nvmrc, cache: npm }
+      - run: npm ci
+      - run: npm run check
+      - name: Vendored parallel-agents is only changed by re-vendoring
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --depth=1 origin "$GITHUB_BASE_REF"
+          changed=$(git diff --name-only FETCH_HEAD HEAD -- .claude/skills/parallel-agents/)
+          if [ -n "$changed" ] && ! printf '%s\n' "$changed" | grep -qx '.claude/skills/parallel-agents/VENDORED'; then
+            echo "::error::.claude/skills/parallel-agents/ was edited by hand. Change the skill at its source and re-vendor."
+            printf '%s\n' "$changed"; exit 1
+          fi

@@ -1,0 +1,7 @@
+node_modules
+dist
+.claude/skills
+.claude/worktrees
+.claude/state
+package-lock.json
+fixtures/out
