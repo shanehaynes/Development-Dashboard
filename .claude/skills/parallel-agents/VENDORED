@@ -1,6 +1,6 @@
 # Pinned copy of the parallel-agents skill. Do not edit here: change the skill
 # at its source, then re-vendor. check-vendored.sh (new-dev-project skill)
 # reports drift against the installed skill and local edits against this stamp.
-source: /Users/shanehaynes/Library/Application Support/Claude/local-agent-mode-sessions/skills-plugin/0924c687-8c5a-41fa-bd52-c10b22afacf7/5ff8e98d-b217-476c-8e3e-8ed758749b88/skills/parallel-agents
+source: parallel-agents skill from the anthropic-skills plugin (installed copy; verify with check-vendored.sh --from <its directory>)
 vendored: 2026-11-04T13:14:20Z
 hash: 6d960113023f0c5e976f7512e5df8d0ef9fc95fcb9553068b0e2b432afe3edfe

@@ -17,7 +17,7 @@ Repo, gate, CI, specs and the vendored parallel-agents skill, ready for parallel
 - [x] `npm run fixtures` writes synthetic repos to the gitignored `fixtures/out/`.
 - [x] Repo settings hold: squash only, head branches auto-delete, update-branch suggestions, squash title and body from the PR.
 - [ ] `main` requires `check` on an up-to-date branch, linear history, no force pushes or deletion, admins included.
-- [ ] `gh repo view --json isPrivate` reports true, and no committed file holds a local absolute path or a list of repos.
+- [x] `gh repo view --json isPrivate` reports true, and no committed file holds a local absolute path or a list of repos.
 - [x] `npm run check` passes in the first commit and in a fresh lane; CI `check` passes on `main`; agent-guard refuses a writing subagent whose brief has no `Lane:` line.
 
 ## Phase 1: Live board `live-board`
