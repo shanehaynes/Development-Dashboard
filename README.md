@@ -20,4 +20,4 @@ npm run dev      # this lane's port; synthetic fixtures, never real repos
 npm run check    # typecheck, tests, lint, format; CI runs the same
 ```
 
-The plan: [docs/mission.md](docs/mission.md) · [docs/tech-stack.md](docs/tech-stack.md) · [docs/roadmap.md](docs/roadmap.md) · [docs/backlog.md](docs/backlog.md) · [docs/decisions/](docs/decisions/). Rules for sessions: [CLAUDE.md](CLAUDE.md), [CONTRIBUTING.md](CONTRIBUTING.md). Private repository (decided 2026-11-03): it commits code, its own specs and curated lessons, never a list of Shane's repos or a local path.
+The plan: [docs/mission.md](docs/mission.md) · [docs/tech-stack.md](docs/tech-stack.md) · [docs/roadmap.md](docs/roadmap.md) · [docs/backlog.md](docs/backlog.md) · [docs/decisions/](docs/decisions/). Rules for sessions: [CLAUDE.md](CLAUDE.md), [CONTRIBUTING.md](CONTRIBUTING.md). Public repository (decided 2026-11-05), guarded: it commits code, its own specs and curated lessons, never a list of Shane's repos or a local path; `scripts/privacy-guard.mjs` refuses a commit or push that carries one.

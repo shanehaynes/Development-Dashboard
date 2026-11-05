@@ -66,7 +66,7 @@ Commits, PR titles and bodies, and branch and tag names carry nothing private: n
 
 Squash-merge only; the squash commit takes the PR title and body. Merge serially: after each merge the next PR runs `git merge origin/main && git push` and waits for a green `check`. Every PR is based on `main` — never stack. Before opening several PRs at once, prove they combine (parallel-agents' combine check, with the gate).
 
-Branch protection is not applied: GitHub refuses it on this private repo on the current plan (HTTP 403). Shane has not chosen yet: GitHub Pro, a public repo with guards, or convention only (the open `**Shane (decide):**` box in `day-0`; [merge settings](docs/decisions/2026-11-04-merge-settings.md)). Until he does, nothing on GitHub stops a red or stale merge; these rules bind by convention.
+Branch protection is applied (2026-11-05): `main` requires the `check` job on an up-to-date branch, linear history, no force pushes or deletions, enforced for admins, zero required reviews ([merge settings](docs/decisions/2026-11-04-merge-settings.md)). The repo is public ([visibility](docs/decisions/2026-11-05-visibility-public.md)); the Privacy section says what keeps it safe.
 
 Held for Shane (never merged by an agent): `.github/`, `.claude/settings.json`, `.claude/skills/`, `package.json` dependencies, `scripts/privacy-guard.mjs`, `.githooks/`, `docs/mission.md` (only Shane amends it).
 

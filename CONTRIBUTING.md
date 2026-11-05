@@ -109,18 +109,18 @@ From phase 2, `node contract/lint.mjs` will check all of this inside `npm run ch
 
 ## 9. Merging
 
-**How it fails.** Two PRs each green against `main` can be red together: one tightens a rule, the other adds what it rejects. Merged in parallel, they break `main` with no PR at fault. An agent merging into a held path changes how every session works without Shane seeing it. Today nothing on GitHub stops either: branch protection is not applied.
+**How it fails.** Two PRs each green against `main` can be red together: one tightens a rule, the other adds what it rejects. Merged in parallel, they break `main` with no PR at fault. An agent merging into a held path changes how every session works without Shane seeing it. GitHub stops the first: `main` takes only a green `check` on an up-to-date branch. Only convention stops the second.
 
 - A lane commits, pushes its branch and reports; the orchestrator opens the PR and merges. Squash only. Every PR is based on `main`; never stack.
 - Merge serially: after each merge, the next PR runs `git merge origin/main && git push` and waits for a green `check`.
 - Before several PRs open at once, prove they combine: `bash .claude/skills/parallel-agents/scripts/combine-check.sh --check "npm ci && npm run check" <branch> <branch> …`. The fold proves what the command runs and nothing more.
 - Held for Shane, never merged by an agent: `.github/`, `.claude/settings.json`, `.claude/skills/`, `package.json` dependencies, `docs/mission.md`. In adopted repos the vendored `dev-dashboard` copy is held too.
-- Set on GitHub: squash only, squash commit from the PR title and body, branch-update suggestions, auto-delete of merged branches. Not set: branch protection (required `check`, up to date, linear history, no force pushes or deletions, admins included). GitHub refuses it on this private repo on the current plan (HTTP 403). Shane has not yet chosen: GitHub Pro, a public repo with guards, or convention only ([merge settings](docs/decisions/2026-11-04-merge-settings.md)). Until he does, the bullets above are convention, not enforcement.
+- Set on GitHub (2026-11-05): squash only, squash commit from the PR title and body, branch-update suggestions, auto-delete of merged branches, and protection on `main`: required `check`, up to date, linear history, no force pushes or deletions, admins included, zero required reviews ([merge settings](docs/decisions/2026-11-04-merge-settings.md)). The repo is public ([visibility](docs/decisions/2026-11-05-visibility-public.md)), which is what made protection available on the account's plan.
 
 ## 10. What will go wrong first (predicted)
 
 Nothing has gone wrong yet; the project is at day 0. This is the incident the rules above predict.
 
-A lane building the registry reader wants real sessions to test against, so it runs `npm start`. Its poller calls `git status` without `--no-optional-locks`. In another repo a session runs `git commit` mid-poll and fails on `index.lock`. It follows git's advice and deletes the lock, which is safe only when no other git process holds it; one does, and two processes now write that repo's index. Meanwhile the lane screenshots its board for the PR. The image and the PR text show a private repo's name and three session names. The repo is private, so nobody objects. Then the PR text becomes a lesson, the lesson is promoted into a skill source, and the skill is vendored into a public repo.
+A lane building the registry reader wants real sessions to test against, so it runs `npm start`. Its poller calls `git status` without `--no-optional-locks`. In another repo a session runs `git commit` mid-poll and fails on `index.lock`. It follows git's advice and deletes the lock, which is safe only when no other git process holds it; one does, and two processes now write that repo's index. Meanwhile the lane screenshots its board for the PR. The image and the PR text show a private repo's name and three session names. The lane commits with `--no-verify` to get past the hook, and CI's scan fires only after the push has published the branch. Then the PR text becomes a lesson, the lesson is promoted into a skill source, and the skill is vendored into a public repo.
 
 Sections 1, 2, 7 and 8 each cut one link of that chain.

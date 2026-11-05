@@ -10,14 +10,16 @@ Repo, gate, CI, specs and the vendored parallel-agents skill, ready for parallel
 
 - Order: any
 - [x] **Shane (decide):** repo visibility: private. (Shane 2026-11-03)
-- [ ] **Shane (decide):** branch protection on this private repo: GitHub Pro, a public repo, or convention only.
+- [x] **Shane (decide):** branch protection on this private repo: GitHub Pro, a public repo, or convention only. (Shane 2026-11-05)
+- [x] **Shane (decide):** repo visibility: public with privacy guards, superseding private. (Shane 2026-11-05)
 - [x] Vite 8, React 19 and strict TypeScript are scaffolded; `npm run check` is the gate; CI job `check` runs it on pushes to `main` and on PRs.
 - [x] The parallel-agents skill is vendored with its `VENDORED` stamp; agent-guard runs as a `PreToolUse` hook; CI refuses hand edits to the copy.
 - [x] `CLAUDE.md`, `docs/mission.md`, `docs/tech-stack.md`, this file and `docs/backlog.md` exist; decision records cover stakes, visibility, stack, read-only posture, no status board and contract v1.
 - [x] `npm run fixtures` writes synthetic repos to the gitignored `fixtures/out/`.
 - [x] Repo settings hold: squash only, head branches auto-delete, update-branch suggestions, squash title and body from the PR.
-- [ ] `main` requires `check` on an up-to-date branch, linear history, no force pushes or deletion, admins included.
-- [ ] `gh repo view --json isPrivate` reports true, and no committed file holds a local absolute path or a list of repos.
+- [x] `main` requires `check` on an up-to-date branch, linear history, no force pushes or deletion, admins included.
+- [x] The repository's visibility matches the visibility decision, and no committed file holds a local absolute path or a list of repos.
+- [x] Privacy guards run: `.githooks/pre-commit` and `pre-push` through `core.hooksPath`, `scripts/privacy-guard.mjs --all` inside `npm run check`, and the CI range scan on PRs and pushes to `main`.
 - [x] `npm run check` passes in the first commit and in a fresh lane; CI `check` passes on `main`; agent-guard refuses a writing subagent whose brief has no `Lane:` line.
 
 ## Phase 1: Live board `live-board`
