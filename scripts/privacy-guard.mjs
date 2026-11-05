@@ -1,22 +1,30 @@
 #!/usr/bin/env node
 // Refuses private data in what git is about to record or publish.
 //
-//   node scripts/privacy-guard.mjs --staged            staged files (pre-commit hook)
-//   node scripts/privacy-guard.mjs --range <a>..<b>    messages and files of every commit in a..b,
-//                                                      plus changed files at b (pre-push hook, CI)
-//   node scripts/privacy-guard.mjs --all               every tracked file in the work tree (the gate)
-//   node scripts/privacy-guard.mjs --stdin <label>     text on stdin, e.g. a PR title and body (CI)
+//   node scripts/privacy-guard.mjs --staged          staged files (pre-commit hook)
+//   node scripts/privacy-guard.mjs --range <a>..<b>  every commit in a..b (message, author, committer,
+//                                                    changed files) and the changed files at b
+//   node scripts/privacy-guard.mjs --history <rev>   the same for every commit reachable from <rev>
+//   node scripts/privacy-guard.mjs --all             every tracked file in the work tree (the gate)
+//   node scripts/privacy-guard.mjs --stdin <label>   text on stdin: a PR title and body, a tag, ref names
 //
 // Exit 0 clean, 1 hits, 2 could not scan, 64 usage. One line per hit:
-// `where:line: KIND: tok… (why)`, the token cut to its first 3 characters.
+// `where:line: KIND: tok… (why)`. Tokens, and hits inside a file name, are cut to 3 characters.
 //
-// Generic checks run everywhere: home-directory paths, emails outside the allowed forms, UUIDs
-// outside fixtures/ and tests/, github.com owners outside the allowlist, images outside
-// fixtures/shots/. The denylist check runs only on Shane's machine: names of repos under the
-// discovery roots, their origin slugs, his private GitHub repos (gh, cached 24 h in
-// ~/.devdash/cache/) and session names from ~/.claude/sessions/*.json (never the .key files).
-// No list is stored in the repo and none is printed. DEVDASH_DENYLIST_FILE=<JSON array>
-// replaces the machine's list (tests). Writes nothing but that cache. Node builtins only.
+// Generic checks run everywhere: home-directory paths (also JSON-escaped, URL-encoded and in
+// Claude's `-Users-<name>-…` folder names), emails outside the allowed forms, UUIDs outside
+// fixtures/ and tests/, GitHub owners outside the allowlist, images, video and PDFs outside
+// fixtures/shots/ (by extension or by content), file names with control characters or invalid
+// UTF-8, and content the guard cannot read: files over 2 MB (lockfiles are read whole) and
+// compressed archives. Other binaries are scanned as strings. Content under fixtures/shots/ is
+// trusted: only its text and metadata are checked.
+//
+// The denylist check runs only on Shane's machine: names of repos under the discovery roots, their
+// origin slugs, his private GitHub repos (gh, cached 24 h in ~/.devdash/cache/) and session names
+// from ~/.claude/sessions/*.json (never the .key files), minus `privacyAllow` in
+// ~/.devdash/config.json. No list is stored in the repo and none is printed.
+// DEVDASH_DENYLIST_FILE=<JSON array> replaces the machine's list (tests) and says so on stderr.
+// Writes nothing but that cache. Node builtins only.
 import { execFileSync } from 'node:child_process'
 import {
   lstatSync,
@@ -26,6 +34,7 @@ import {
   readlinkSync,
   renameSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
@@ -34,49 +43,91 @@ import { dirname, join, resolve } from 'node:path'
 const MAX_BYTES = 2 * 1024 * 1024
 const SNIFF_BYTES = 8192
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000
+const RETRY_MS = 60 * 60 * 1000
 const LOCKFILES = new Set([
   'package-lock.json',
   'npm-shrinkwrap.json',
   'yarn.lock',
   'pnpm-lock.yaml',
 ])
-const IMAGE = /\.(?:png|jpe?g|gif|webp|heic|bmp|tiff?)$/i
+const MEDIA_EXT = /\.(?:png|jpe?g|gif|webp|heic|heif|avif|bmp|tiff?|ico|pdf|mov|mp4|m4v|webm)$/i
 const SHOTS = 'fixtures/shots/'
 const UUID_OK = /^(?:fixtures|tests)\//
-const OWNERS = new Set(['shanehaynes', 'actions', 'github'])
+// Owners, and GitHub's own first path segments that are not owners.
+const OWNERS = new Set([
+  'shanehaynes',
+  'actions',
+  'github',
+  'about',
+  'apps',
+  'collections',
+  'contact',
+  'customer-stories',
+  'enterprise',
+  'explore',
+  'features',
+  'issues',
+  'login',
+  'marketplace',
+  'new',
+  'notifications',
+  'orgs',
+  'pricing',
+  'pulls',
+  'search',
+  'security',
+  'settings',
+  'site',
+  'sponsors',
+  'topics',
+  'trending',
+  'users',
+])
 const EMAILS = new Set(['noreply@anthropic.com', 'git@github.com', 'noreply@github.com'])
-const PUBLIC = new Set(
-  [
-    'shanehaynes',
-    'apex-training',
-    'assignment-tracker',
-    'development-dashboard',
-    'alpha-notes',
-    'beta-tracker',
-    'gamma-site',
-    'fixture bot',
-  ].map((name) => name.toLowerCase()),
-)
+const PUBLIC = new Set([
+  'shanehaynes',
+  'apex-training',
+  'assignment-tracker',
+  'development-dashboard',
+  'alpha-notes',
+  'beta-tracker',
+  'gamma-site',
+  'fixture bot',
+])
 
-const HOME_UNIX = /(?<![\w.-])\/(?:Users|home)\/[\w.-]+/g
-const HOME_WIN = /\b[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s"'`<>|:*?]+/gi
-const EMAIL = /[\w.%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b/g
-const UUID = /\b[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi
-const GITHUB = /(?<![\w.-])(?:www\.)?github\.com[/:]([A-Za-z0-9-]+)(?![\w-])/gi
+const SEP = String.raw`(?:/|\\/|%2[Ff])`
+const HOME = [
+  new RegExp(String.raw`${SEP}Users${SEP}[\w.-]+|(?<![\w.-])${SEP}home${SEP}[\w.-]+`, 'g'),
+  /\b[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s"'`<>|:*?]+/gi,
+  // Claude's encoded folder names: ~/.claude/projects/-Users-<name>-…, C--Users-<name>-…
+  /(?<![\w.-])(?:[A-Za-z]-)?-(?:Users|home)-[A-Za-z0-9][\w.-]*/g,
+]
+const EMAIL =
+  /(?<![\w.%+-])[\w.%+-]{1,64}(?:@|%40)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b/g
+const UUID =
+  /(?<![0-9A-Fa-f])[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?![0-9A-Fa-f])/gi
+const GITHUB = [
+  /(?<![\w.-])(?:www\.|gist\.)?github\.com(?:[/:]|%2[Ff])(?:(?:orgs|sponsors|users)\/)?([A-Za-z0-9-]+)(?![\w-])/gi,
+  /(?<![\w.-])raw\.githubusercontent\.com\/([A-Za-z0-9-]+)/gi,
+  /(?<![\w.-])api\.github\.com\/(?:repos|users|orgs)\/([A-Za-z0-9-]+)/gi,
+  /(?<![\w.-])([A-Za-z0-9-]+)\.github\.io\b/gi,
+]
+const DATA_IMAGE = /data:image\/(?!svg)[\w.+-]+[;,]/gi
 const WORD = /[\w-]/
 
 const WHY = {
-  'home-path': 'absolute home-directory path',
+  'home-path': 'home-directory path',
   email: 'email outside the allowed forms',
   uuid: 'UUID-shaped id, e.g. a session id, outside fixtures/ and tests/',
-  'github-owner': 'github.com owner other than shanehaynes, actions or github',
-  image: 'image outside fixtures/shots/',
-  denylist: "name on this machine's denylist: a private repo, an origin slug or a session name",
+  'github-owner': 'GitHub owner other than shanehaynes, actions or github',
+  image: 'image, video or PDF outside fixtures/shots/',
+  unscanned: 'content the guard cannot read; keep it out of the repo',
+  'bad-path': 'file name with a control character or invalid UTF-8',
+  denylist: "name on this machine's denylist: a repo, an origin slug or a session name",
 }
 
-const USAGE = 'usage: privacy-guard.mjs --staged | --range <a>..<b> | --all | --stdin <label>'
-
-class UsageError extends Error {}
+const USAGE =
+  'usage: privacy-guard.mjs --staged | --all | --range <a>..<b> | --history <rev> | --stdin <label>'
 
 function git(root, args, input) {
   return execFileSync('git', args, {
@@ -88,86 +139,133 @@ function git(root, args, input) {
   })
 }
 
-const splitZ = (buf) => buf.toString('utf8').split('\0').filter(Boolean)
+const notice = (text) => console.error(`privacy-guard: ${text}`)
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`
 const redact = (token) => (token.length <= 3 ? token : `${token.slice(0, 3)}…`)
-const isBinary = (buf) => buf.subarray(0, SNIFF_BYTES).includes(0)
+const strings = (value) => (Array.isArray(value) ? value.filter((v) => typeof v === 'string') : [])
+const baseName = (path) => path.slice(path.lastIndexOf('/') + 1)
 
-// Reads `<rev>:<path>` specs in two git calls. Missing objects, submodules and blobs over
-// MAX_BYTES come back as { skip }.
-function readBlobs(root, specs) {
+function splitZ(buf) {
+  const parts = []
+  for (let pos = 0; pos < buf.length;) {
+    let end = buf.indexOf(0, pos)
+    if (end === -1) end = buf.length
+    if (end > pos) parts.push(buf.subarray(pos, end))
+    pos = end + 1
+  }
+  return parts
+}
+
+// ---- reading --------------------------------------------------------------------------------
+
+// `git diff --raw -z` and `git diff-tree [-c] --raw -z`: ":<modes> <shas> <status>\0<path>\0".
+// With n leading colons there are n+1 modes, then n+1 shas; the last of each is the result.
+function rawEntries(buf) {
+  const parts = splitZ(buf)
+  const out = []
+  for (let i = 0; i < parts.length; i++) {
+    const header = parts[i].toString('latin1')
+    if (!header.startsWith(':')) continue
+    const n = /^:+/.exec(header)[0].length
+    const fields = header.slice(n).split(' ')
+    out.push({ sha: fields[2 * n + 1], path: parts[++i] })
+  }
+  return out.filter((entry) => entry.path)
+}
+
+// `git ls-tree -r -z`: "<mode> <type> <sha>\t<path>".
+function treeEntries(buf) {
+  return splitZ(buf).flatMap((record) => {
+    const tab = record.indexOf(9)
+    const [, type, sha] = record.toString('latin1', 0, tab).split(' ')
+    return type === 'blob' ? [{ sha, path: record.subarray(tab + 1) }] : []
+  })
+}
+
+const isLockfile = (path) => LOCKFILES.has(baseName(path.toString('utf8')))
+
+// Reads blobs by object id in two git calls: { data }, { size } when over MAX_BYTES and not a
+// lockfile, or { skip } for a submodule or a missing object.
+function readBlobs(root, entries) {
   const out = new Map()
-  const usable = [...new Set(specs)].filter((spec) => !/[\r\n]/.test(spec))
-  if (!usable.length) return out
-  const input = `${usable.join('\n')}\n`
-  const checks = git(root, ['cat-file', '--batch-check=%(objecttype) %(objectsize)'], input)
-    .toString('utf8')
+  const ids = [...new Set(entries.map((e) => e.sha))].filter(
+    (sha) => /^[0-9a-f]{40,64}$/.test(sha) && !/^0+$/.test(sha),
+  )
+  if (!ids.length) return out
+  const whole = new Set(entries.filter((e) => isLockfile(e.path)).map((e) => e.sha))
+  const checks = git(root, ['cat-file', '--batch-check'], `${ids.join('\n')}\n`)
+    .toString('latin1')
     .split('\n')
   const wanted = []
-  usable.forEach((spec, i) => {
-    const [type, size] = (checks[i] ?? '').split(' ')
-    if (type !== 'blob') out.set(spec, { skip: 'not a file' })
-    else if (Number(size) > MAX_BYTES) out.set(spec, { skip: 'over 2 MB' })
-    else wanted.push(spec)
+  ids.forEach((sha, i) => {
+    const [, type, size] = (checks[i] ?? '').split(' ')
+    if (type !== 'blob') out.set(sha, { skip: true })
+    else if (Number(size) > MAX_BYTES && !whole.has(sha)) out.set(sha, { size: Number(size) })
+    else wanted.push(sha)
   })
   if (!wanted.length) return out
   const buf = git(root, ['cat-file', '--batch'], `${wanted.join('\n')}\n`)
   let pos = 0
-  for (const spec of wanted) {
+  for (const sha of wanted) {
     const eol = buf.indexOf(10, pos)
-    const size = Number(buf.toString('utf8', pos, eol).split(' ')[2])
-    out.set(spec, { data: buf.subarray(eol + 1, eol + 1 + size) })
+    const size = Number(buf.toString('latin1', pos, eol).split(' ')[2])
+    out.set(sha, { data: buf.subarray(eol + 1, eol + 1 + size) })
     pos = eol + 1 + size + 1
   }
   return out
 }
 
 function readWorkTree(root, path) {
-  const full = join(root, path)
+  const full = Buffer.concat([Buffer.from(`${root}/`), path])
   let stat
   try {
     stat = lstatSync(full)
   } catch {
-    return { skip: 'missing' }
+    return { skip: true }
   }
-  if (stat.isSymbolicLink()) return { data: Buffer.from(readlinkSync(full)) }
-  if (!stat.isFile()) return { skip: 'not a file' }
-  if (stat.size > MAX_BYTES) return { skip: 'over 2 MB' }
+  if (stat.isSymbolicLink()) return { data: readlinkSync(full, { encoding: 'buffer' }) }
+  if (!stat.isFile()) return { skip: true }
+  if (stat.size > MAX_BYTES && !isLockfile(path)) return { size: stat.size }
   return { data: readFileSync(full) }
 }
 
 // ---- denylist -------------------------------------------------------------------------------
 
-function isPublic(name) {
-  const lower = name.toLowerCase()
+function isPublic(lower) {
   return PUBLIC.has(lower) || (lower.includes('/') && lower.split('/').every((p) => PUBLIC.has(p)))
 }
 
-// Drops entries under 4 characters, entries with no letter, and the public names. A single plain
-// lowercase word matches only as a path or URL segment.
-function compileDenylist(raw) {
-  const seen = new Set()
-  for (const item of raw) {
-    if (typeof item !== 'string') continue
+// Drops entries under 4 characters, entries with no letter, the public names and privacyAllow.
+// Matching ignores case; a single alphabetic word matches only as a path or URL segment.
+function compileDenylist(raw, allow) {
+  const drop = new Set(allow.map((name) => name.trim().toLowerCase()))
+  const seen = new Map()
+  for (const item of strings(raw)) {
     const name = item.trim()
-    if (name.length < 4 || !/[A-Za-z]/.test(name) || isPublic(name)) continue
-    seen.add(name)
+    const lower = name.toLowerCase()
+    if (name.length < 4 || !/[a-z]/i.test(name) || isPublic(lower) || drop.has(lower)) continue
+    if (!seen.has(lower)) seen.set(lower, name)
   }
-  return [...seen].map((text) => ({ text, plain: /^[a-z]+$/.test(text) }))
+  return [...seen.values()].map((text) => ({
+    re: new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'),
+    plain: /^[A-Za-z]+$/.test(text),
+  }))
 }
 
-function discoveryRoots(home) {
-  const expand = (root) =>
-    root === '~' ? home : root.startsWith('~/') ? join(home, root.slice(2)) : root
+function readConfig(home) {
   try {
     const config = JSON.parse(readFileSync(join(home, '.devdash', 'config.json'), 'utf8'))
-    const roots = Array.isArray(config.roots)
-      ? config.roots.filter((r) => typeof r === 'string')
-      : []
-    if (roots.length) return roots.map(expand)
+    return config && typeof config === 'object' ? config : {}
   } catch {
-    // no config: the default root
+    return {}
   }
-  return [join(home, 'Developer')]
+}
+
+function discoveryRoots(home, config) {
+  const expand = (root) =>
+    root === '~' ? home : root.startsWith('~/') ? join(home, root.slice(2)) : root
+  const roots = strings(config.roots)
+  return roots.length ? roots.map(expand) : [join(home, 'Developer')]
 }
 
 function originUrl(repo, dotgit, stat) {
@@ -201,9 +299,9 @@ function slugOf(url) {
   return parts.length >= 2 ? parts.slice(-2).join('/') : null
 }
 
-function fromRoots(home) {
+function fromRoots(home, config) {
   const names = []
-  for (const root of discoveryRoots(home)) {
+  for (const root of discoveryRoots(home, config)) {
     let entries
     try {
       entries = readdirSync(root)
@@ -227,26 +325,33 @@ function fromRoots(home) {
 }
 
 function writeCache(file, value) {
+  const tmp = `${file}.${process.pid}.tmp`
   try {
     mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
-    const tmp = `${file}.${process.pid}.tmp`
     writeFileSync(tmp, `${JSON.stringify(value)}\n`, { mode: 0o600 })
     renameSync(tmp, file)
   } catch {
-    // the cache is an optimisation
+    try {
+      unlinkSync(tmp)
+    } catch {
+      // nothing written
+    }
   }
 }
 
+// Private repo names from gh, cached 24 h. A failure is cached too, so a hung network costs one
+// timeout an hour, not one per commit; the last good names stay in use meanwhile.
 function fromGh(home) {
   const file = join(home, '.devdash', 'cache', 'privacy-denylist.json')
-  let cached = null
+  let cached = {}
   try {
-    cached = JSON.parse(readFileSync(file, 'utf8'))
-    if (!Array.isArray(cached.names)) cached = null
+    cached = JSON.parse(readFileSync(file, 'utf8')) ?? {}
   } catch {
     // no cache yet
   }
-  if (cached && Date.now() - Date.parse(cached.fetchedAt) < CACHE_TTL_MS) return cached.names
+  const names = strings(cached.names)
+  const age = (stamp) => Date.now() - Date.parse(stamp)
+  if (age(cached.fetchedAt) < CACHE_TTL_MS || age(cached.failedAt) < RETRY_MS) return names
   try {
     const out = execFileSync('gh', ['repo', 'list', '--json', 'name,isPrivate', '--limit', '200'], {
       encoding: 'utf8',
@@ -254,13 +359,15 @@ function fromGh(home) {
       stdio: ['ignore', 'pipe', 'ignore'],
       env: { ...process.env, GH_PROMPT_DISABLED: '1', NO_COLOR: '1' },
     })
-    const names = JSON.parse(out)
+    const fresh = JSON.parse(out)
       .filter((repo) => repo && repo.isPrivate === true && typeof repo.name === 'string')
       .map((repo) => repo.name)
-    writeCache(file, { fetchedAt: new Date().toISOString(), names })
-    return names
+    writeCache(file, { fetchedAt: new Date().toISOString(), names: fresh })
+    return fresh
   } catch {
-    return cached ? cached.names : []
+    const failedAt = new Date().toISOString()
+    writeCache(file, { fetchedAt: cached.fetchedAt ?? null, names, failedAt })
+    return names
   }
 }
 
@@ -285,15 +392,25 @@ function fromSessions(home) {
 }
 
 function loadDenylist() {
+  const home = homedir()
+  const config = readConfig(home)
+  const allow = strings(config.privacyAllow)
   const file = process.env.DEVDASH_DENYLIST_FILE
   if (file) {
     const list = JSON.parse(readFileSync(file, 'utf8'))
     if (!Array.isArray(list)) throw new Error('DEVDASH_DENYLIST_FILE must hold a JSON array')
-    return compileDenylist(list)
+    const deny = compileDenylist(list, allow)
+    notice(`denylist replaced by DEVDASH_DENYLIST_FILE (${plural(deny.length, 'name')})`)
+    return deny
   }
-  if (process.env.GITHUB_ACTIONS === 'true') return []
-  const home = homedir()
-  return compileDenylist([...fromRoots(home), ...fromGh(home), ...fromSessions(home)])
+  if (process.env.GITHUB_ACTIONS === 'true') {
+    notice('no denylist under GITHUB_ACTIONS=true: generic checks only')
+    return []
+  }
+  return compileDenylist(
+    [...fromRoots(home, config), ...fromGh(home), ...fromSessions(home)],
+    allow,
+  )
 }
 
 function leftBoundary(line, i) {
@@ -302,18 +419,25 @@ function leftBoundary(line, i) {
   return j < 0 || !WORD.test(line[j])
 }
 
-// Whole-token match: a token is a maximal run of [A-Za-z0-9_.-]; a trailing `.git` or sentence
-// period does not extend it.
+// Whole-token match, ignoring case: a token is a maximal run of [A-Za-z0-9_.-]; a trailing `.git`
+// or sentence period does not extend it. A single word needs a `/` next to it (or `\` on a line
+// with a drive letter), and a leading dot makes it another name (`.claude` is not `claude`).
 function denylistMatches(line, entries) {
   const found = []
-  for (const { text, plain } of entries) {
-    for (let i = line.indexOf(text); i !== -1; i = line.indexOf(text, i + 1)) {
-      const rest = line.slice(i + text.length)
+  const backslash = /\b[A-Za-z]:\\/.test(line)
+  const sep = (c) => c === '/' || (backslash && c === '\\')
+  for (const { re, plain } of entries) {
+    for (const m of line.matchAll(re)) {
+      const rest = line.slice(m.index + m[0].length)
+      const dotgit = /^(?:\.git)?/.exec(rest)[0]
       const tail = /^(?:\.git)?\.*/.exec(rest)[0]
-      if (!leftBoundary(line, i) || WORD.test(rest[tail.length] ?? '')) continue
-      if (plain && line[i - 1] !== '/' && line[i - 1] !== '\\' && !/^(?:\.git)?[/\\]/.test(rest))
-        continue
-      found.push(text)
+      if (WORD.test(rest[tail.length] ?? '')) continue
+      if (plain) {
+        const before = line[m.index - 1] ?? ''
+        if (WORD.test(before) || before === '.') continue
+        if (!sep(before) && !sep(rest[dotgit.length] ?? '')) continue
+      } else if (!leftBoundary(line, m.index)) continue
+      found.push(m[0])
     }
   }
   return found
@@ -322,7 +446,7 @@ function denylistMatches(line, entries) {
 // ---- scanning -------------------------------------------------------------------------------
 
 function emailAllowed(email) {
-  const lower = email.toLowerCase()
+  const lower = email.toLowerCase().replace('%40', '@')
   const domain = lower.slice(lower.lastIndexOf('@') + 1)
   return (
     EMAILS.has(lower) ||
@@ -331,46 +455,137 @@ function emailAllowed(email) {
   )
 }
 
-function scanLine(text, loc, path, deny, add) {
-  const base = path ? path.slice(path.lastIndexOf('/') + 1) : ''
-  const lockfile = LOCKFILES.has(base)
-  const hit = (kind, token) => add({ loc, path, kind, token })
-  for (const m of text.matchAll(HOME_UNIX)) hit('home-path', m[0])
-  for (const m of text.matchAll(HOME_WIN)) hit('home-path', m[0])
-  if (!lockfile) for (const m of text.matchAll(EMAIL)) if (!emailAllowed(m[0])) hit('email', m[0])
-  if (!(path && UUID_OK.test(path))) for (const m of text.matchAll(UUID)) hit('uuid', m[0])
-  if (!lockfile)
-    for (const m of text.matchAll(GITHUB))
-      if (!OWNERS.has(m[1].toLowerCase())) hit('github-owner', m[1])
-  for (const token of denylistMatches(text, deny)) hit('denylist', token)
+function context(path, deny) {
+  return {
+    path,
+    deny,
+    lockfile: path !== null && LOCKFILES.has(baseName(path)),
+    uuidOk: path !== null && UUID_OK.test(path),
+    shots: path !== null && path.startsWith(SHOTS),
+    emails: true,
+  }
 }
 
-function scanText(text, label, path, deny, add) {
+function scanLine(text, loc, ctx, add) {
+  const hit = (kind, token) => add({ loc, path: ctx.path, kind, token })
+  for (const re of HOME) for (const m of text.matchAll(re)) hit('home-path', m[0])
+  if (ctx.emails && !ctx.lockfile)
+    for (const m of text.matchAll(EMAIL)) if (!emailAllowed(m[0])) hit('email', m[0])
+  if (!ctx.uuidOk) for (const m of text.matchAll(UUID)) hit('uuid', m[0])
+  if (!ctx.lockfile)
+    for (const re of GITHUB)
+      for (const m of text.matchAll(re))
+        if (!OWNERS.has(m[1].toLowerCase())) hit('github-owner', m[1])
+  if (!ctx.shots) for (const m of text.matchAll(DATA_IMAGE)) hit('image', m[0])
+  for (const token of denylistMatches(text, ctx.deny)) hit('denylist', token)
+}
+
+function scanText(text, label, ctx, add) {
   text.split('\n').forEach((line, i) => {
-    scanLine(line.endsWith('\r') ? line.slice(0, -1) : line, `${label}:${i + 1}`, path, deny, add)
+    scanLine(line.endsWith('\r') ? line.slice(0, -1) : line, `${label}:${i + 1}`, ctx, add)
   })
 }
 
-function scanPath(path, deny, add) {
-  if (IMAGE.test(path) && !path.startsWith(SHOTS))
-    add({ loc: path, path, kind: 'image', token: path.slice(path.lastIndexOf('/') + 1) })
-  scanLine(path, path, path, deny, add)
+// 'media' (image, video, PDF), 'archive' (compressed, unreadable), 'font', 'binary' or null (text).
+function sniff(data) {
+  const at = (i, magic) => data.toString('latin1', i, i + magic.length) === magic
+  const binary = data.subarray(0, SNIFF_BYTES).includes(0)
+  const media =
+    ['\x89PNG\r\n\x1a\n', '\xff\xd8\xff', 'GIF87a', 'GIF89a', '%PDF-', 'II*\x00', 'MM\x00*'].some(
+      (magic) => at(0, magic),
+    ) ||
+    at(0, '\x1aE\xdf\xa3') ||
+    (at(0, 'RIFF') && at(8, 'WEBP')) ||
+    (binary && (at(4, 'ftyp') || at(0, 'BM') || at(0, '\x00\x00\x01\x00')))
+  if (media) return 'media'
+  const archive =
+    ['PK\x03\x04', 'PK\x05\x06', '\x1f\x8b', '\xfd7zXZ\x00', "7z\xbc\xaf'\x1c", '(\xb5/\xfd'].some(
+      (magic) => at(0, magic),
+    ) ||
+    at(0, 'Rar!\x1a\x07') ||
+    (binary && at(0, 'BZh'))
+  if (archive) return 'archive'
+  if (!binary) return null
+  return ['wOFF', 'wOF2', 'OTTO', '\x00\x01\x00\x00'].some((magic) => at(0, magic))
+    ? 'font'
+    : 'binary'
 }
 
-function scanFile(path, blob, deny, add, skipped) {
-  scanPath(path, deny, add)
-  if (!blob || blob.skip) {
-    if (blob?.skip === 'over 2 MB') skipped.push(path)
+// Text when there is no NUL in the first 8 KB or a UTF-16 byte-order mark; otherwise null.
+function decodeText(data) {
+  if (data[0] === 0xff && data[1] === 0xfe) return data.subarray(2).toString('utf16le')
+  if (data[0] === 0xfe && data[1] === 0xff) {
+    const body = Buffer.from(data.subarray(2, 2 + ((data.length - 2) & ~1)))
+    return body.swap16().toString('utf16le')
+  }
+  return data.subarray(0, SNIFF_BYTES).includes(0) ? null : data.toString('utf8')
+}
+
+// Printable runs, as `strings` finds them, once as bytes and once with NULs dropped (UTF-16).
+function binaryStrings(data) {
+  const runs = (buf) =>
+    buf
+      .toString('latin1')
+      .split(/[^\x20-\x7e\t]+/)
+      .filter((run) => run.length >= 4)
+  const packed = Buffer.allocUnsafe(data.length)
+  let n = 0
+  for (const byte of data) if (byte !== 0) packed[n++] = byte
+  return [...runs(data), ...runs(packed.subarray(0, n))]
+}
+
+// A file name's own hits, and the name as printed: control characters escaped, every hit token
+// cut to 3 characters, and an image's base name too (`media`: an image by content).
+function scanName(path, name, deny, media) {
+  const hits = []
+  const ctx = context(name, deny)
+  const escaped = [...name]
+    .map((c) => {
+      const code = c.charCodeAt(0)
+      return code < 0x20 || code === 0x7f ? `\\x${code.toString(16).padStart(2, '0')}` : c
+    })
+    .join('')
+  if (escaped !== name || !Buffer.from(name, 'utf8').equals(path))
+    hits.push({ kind: 'bad-path', token: escaped })
+  scanLine(name, null, ctx, (hit) => hits.push(hit))
+  if ((media || MEDIA_EXT.test(name)) && !ctx.shots)
+    hits.push({ kind: 'image', token: baseName(name) })
+  let shown = escaped
+  for (const { kind, token } of hits) {
+    if (kind === 'bad-path') continue
+    if (kind === 'image') {
+      const base = baseName(shown)
+      const ext = /\.[^.]*$/.exec(base)?.[0] ?? ''
+      shown = `${shown.slice(0, shown.length - base.length)}${redact(base.slice(0, base.length - ext.length))}${ext}`
+    } else shown = shown.split(token).join(redact(token))
+  }
+  return { hits, shown, ctx }
+}
+
+function scanFile(path, blob, deny, add) {
+  const name = path.toString('utf8')
+  const kind = blob?.data ? sniff(blob.data) : null
+  const { hits, shown, ctx } = scanName(path, name, deny, kind === 'media')
+  const report = (hit) => add({ ...hit, loc: shown, path: name })
+  for (const hit of hits) report(hit)
+  if (!blob || blob.skip) return
+  if (blob.data === undefined) {
+    if (!ctx.shots) report({ kind: 'unscanned', note: 'over 2 MB' })
     return
   }
-  if (!isBinary(blob.data)) scanText(blob.data.toString('utf8'), path, path, deny, add)
+  if (kind === 'archive') report({ kind: 'unscanned', note: 'compressed archive' })
+  const text = kind === 'archive' ? null : decodeText(blob.data)
+  if (text !== null) return scanText(text, shown, ctx, add)
+  const binary = { ...ctx, emails: kind === 'binary' }
+  const label = `${shown} (binary)`
+  for (const run of binaryStrings(blob.data)) scanLine(run, label, binary, add)
 }
 
 function collector() {
   const hits = []
   const keys = new Set()
   const add = (hit) => {
-    const key = `${hit.loc}\0${hit.kind}\0${hit.token}`
+    const key = `${hit.loc}\0${hit.kind}\0${hit.token ?? hit.note}`
     if (keys.has(key)) return
     keys.add(key)
     hits.push(hit)
@@ -378,94 +593,101 @@ function collector() {
   return { hits, add }
 }
 
-function staged(root, deny, add, skipped) {
-  const args = ['diff', '--cached', '--name-only', '-z', '--no-renames', '--diff-filter=ACMR']
-  const paths = splitZ(git(root, args))
-  const blobs = readBlobs(
-    root,
-    paths.map((p) => `:0:${p}`),
-  )
-  for (const path of paths) scanFile(path, blobs.get(`:0:${path}`), deny, add, skipped)
+function staged(root, deny, add) {
+  const args = ['diff', '--cached', '--raw', '-z', '--no-abbrev', '--no-renames']
+  const entries = rawEntries(git(root, [...args, '--diff-filter=ACMRT']))
+  const blobs = readBlobs(root, entries)
+  for (const { sha, path } of entries) scanFile(path, blobs.get(sha), deny, add)
 }
 
-function all(root, deny, add, skipped) {
-  const paths = [...new Set(splitZ(git(root, ['ls-files', '-z'])))]
-  for (const path of paths) scanFile(path, readWorkTree(root, path), deny, add, skipped)
+function all(root, deny, add) {
+  const seen = new Set()
+  for (const path of splitZ(git(root, ['ls-files', '-z']))) {
+    const key = path.toString('latin1')
+    if (seen.has(key)) continue
+    seen.add(key)
+    scanFile(path, readWorkTree(root, path), deny, add)
+  }
 }
 
-function range(root, spec, deny, add, skipped) {
-  const m = /^([^.].*?)\.\.([^.].*)$/.exec(spec)
-  if (!m || spec.includes('...')) throw new UsageError(`--range wants <a>..<b>, got '${spec}'`)
+// Commits in `from..to`, or every commit reachable from `to` when `from` is null: messages,
+// authors and committers; files at the tip; and every commit's own files, so a leak added and
+// removed inside the range is still caught (the pushed commits stay public). A merge contributes
+// the files that differ from all its parents, which is where a conflict resolution adds text.
+function range(root, fromSpec, toSpec, deny, add) {
   const rev = (r) =>
     git(root, ['rev-parse', '--verify', '--quiet', `${r}^{commit}`])
       .toString()
       .trim()
-  const [from, to] = [rev(m[1]), rev(m[2])]
+  const to = rev(toSpec)
+  const from = fromSpec === null ? null : rev(fromSpec)
+  const text = context(null, deny)
 
-  // Commit messages.
-  const log = splitZ(git(root, ['log', '-z', '--format=%H %P%n%B', `${from}..${to}`, '--']))
-  const commits = log.map((record) => {
-    const eol = record.indexOf('\n')
-    const [sha, ...parents] = record.slice(0, eol).split(' ').filter(Boolean)
-    scanText(record.slice(eol + 1), `commit ${sha.slice(0, 7)}`, null, deny, add)
+  const format = '--format=%H %P%x1f%an <%ae>%x1f%cn <%ce>%x1f%B'
+  const log = git(root, ['log', '-z', format, from ? `${from}..${to}` : to, '--'])
+  const commits = splitZ(log).map((record) => {
+    const [head, author, committer, ...body] = record.toString('utf8').split('\x1f')
+    const [sha, ...parents] = head.split(' ').filter(Boolean)
+    const label = `commit ${sha.slice(0, 7)}`
+    scanText(body.join('\x1f'), label, text, add)
+    scanLine(author ?? '', `${label} author`, text, add)
+    scanLine(committer ?? '', `${label} committer`, text, add)
     return { sha, merge: parents.length > 1 }
   })
 
-  // Files changed on this side of the range, at its tip.
-  let base = from
-  try {
-    base = git(root, ['merge-base', from, to]).toString().trim()
-  } catch {
-    // unrelated or shallow history: diff against the range start
-  }
-  const diff = ['diff', '--name-only', '-z', '--no-renames', '--diff-filter=ACMR', base, to, '--']
-  const tipPaths = splitZ(git(root, diff))
-  const tip = readBlobs(
-    root,
-    tipPaths.map((p) => `${to}:${p}`),
-  )
-  const key = (hit) => `${hit.path}\0${hit.kind}\0${hit.token}`
+  const filter = ['--no-abbrev', '--no-renames', '--diff-filter=ACMRT']
+  let tipEntries
+  if (from) {
+    let base = from
+    try {
+      base = git(root, ['merge-base', from, to]).toString().trim()
+    } catch {
+      // unrelated or shallow history: diff against the range start
+    }
+    tipEntries = rawEntries(git(root, ['diff-tree', '-r', '-z', '--raw', ...filter, base, to]))
+  } else tipEntries = treeEntries(git(root, ['ls-tree', '-r', '-z', '--full-tree', to]))
+  const tip = readBlobs(root, tipEntries)
+  const key = (hit) => `${hit.path}\0${hit.kind}\0${hit.token ?? hit.note}`
   const atTip = new Set()
   const tipAdd = (hit) => {
     atTip.add(key(hit))
     add(hit)
   }
-  for (const path of tipPaths) scanFile(path, tip.get(`${to}:${path}`), deny, tipAdd, skipped)
+  for (const { sha, path } of tipEntries) scanFile(path, tip.get(sha), deny, tipAdd)
 
-  // Every commit's files, so a leak added and removed inside the range is still caught: the
-  // pushed commits stay public even when the tip is clean.
   const pairs = []
   for (const { sha, merge } of commits) {
-    if (merge) continue
-    const tree = ['diff-tree', '--root', '-r', '--no-commit-id', '--name-only', '-z']
-    for (const path of splitZ(git(root, [...tree, '--no-renames', '--diff-filter=ACMR', sha])))
-      pairs.push({ sha, path })
+    const args = merge
+      ? ['diff-tree', '-r', '-z', '-c', '--raw', '--no-abbrev', '--no-commit-id', sha]
+      : ['diff-tree', '--root', '-r', '-z', '--raw', '--no-commit-id', ...filter, sha]
+    for (const entry of rawEntries(git(root, args))) pairs.push({ ...entry, commit: sha })
   }
-  const history = readBlobs(
-    root,
-    pairs.map(({ sha, path }) => `${sha}:${path}`),
-  )
+  const history = readBlobs(root, pairs)
   const reported = new Set()
-  const historyAdd = (sha) => (hit) => {
-    if (atTip.has(key(hit)) || reported.has(key(hit))) return
-    reported.add(key(hit))
-    add({ ...hit, commit: sha.slice(0, 7) })
+  for (const { sha, path, commit } of pairs) {
+    scanFile(path, history.get(sha), deny, (hit) => {
+      if (atTip.has(key(hit)) || reported.has(key(hit))) return
+      reported.add(key(hit))
+      add({ ...hit, commit: commit.slice(0, 7) })
+    })
   }
-  for (const { sha, path } of pairs)
-    scanFile(path, history.get(`${sha}:${path}`), deny, historyAdd(sha), [])
-}
-
-function stdin(label, deny, add) {
-  scanText(readFileSync(0, 'utf8'), label, null, deny, add)
 }
 
 function main(argv) {
   const [mode, arg, ...extra] = argv
-  const needsArg = mode === '--range' || mode === '--stdin'
-  const known = ['--staged', '--all', '--range', '--stdin'].includes(mode)
-  if (!known || (needsArg ? !arg || extra.length : arg !== undefined)) {
+  const takesArg = ['--range', '--history', '--stdin'].includes(mode)
+  const known = takesArg || mode === '--staged' || mode === '--all'
+  if (!known || (takesArg ? !arg || extra.length : arg !== undefined)) {
     console.error(USAGE)
     return 64
+  }
+  let ends
+  if (mode === '--range') {
+    ends = /^([^.].*?)\.\.([^.].*)$/.exec(arg)
+    if (!ends || arg.includes('...')) {
+      console.error(`privacy-guard: --range wants <a>..<b>, got '${arg}'\n${USAGE}`)
+      return 64
+    }
   }
   let root
   let deny
@@ -478,34 +700,31 @@ function main(argv) {
     return 2
   }
   const { hits, add } = collector()
-  const skipped = []
   try {
-    if (mode === '--staged') staged(root, deny, add, skipped)
-    else if (mode === '--all') all(root, deny, add, skipped)
-    else if (mode === '--range') range(root, arg, deny, add, skipped)
-    else stdin(arg, deny, add)
+    if (mode === '--staged') staged(root, deny, add)
+    else if (mode === '--all') all(root, deny, add)
+    else if (mode === '--range') range(root, ends[1], ends[2], deny, add)
+    else if (mode === '--history') range(root, null, arg, deny, add)
+    else scanText(readFileSync(0, 'utf8'), arg, context(null, deny), add)
   } catch (error) {
-    if (error instanceof UsageError) {
-      console.error(`privacy-guard: ${error.message}\n${USAGE}`)
-      return 64
-    }
     const detail = (error.stderr?.toString() || error.message).trim().split('\n')[0]
     console.error(`privacy-guard: could not scan (${mode}): ${detail}`)
     return 2
   }
-  for (const path of skipped) console.error(`privacy-guard: not scanned, over 2 MB: ${path}`)
-  for (const { loc, kind, token, commit } of hits) {
+  for (const { loc, kind, token, note, commit } of hits) {
     const where = commit ? `; in commit ${commit}, still in history` : ''
-    console.log(`${loc}: ${kind}: ${redact(token)} (${WHY[kind]}${where})`)
+    console.log(`${loc}: ${kind}: ${note ?? redact(token)} (${WHY[kind]}${where})`)
   }
   if (!hits.length) return 0
-  const denylist = deny.length
-    ? `denylist: ${deny.length} name${deny.length === 1 ? '' : 's'}`
-    : 'no denylist'
-  console.error(
-    `privacy-guard: ${hits.length} hit${hits.length === 1 ? '' : 's'} (${mode}; ${denylist}). ` +
-      'Remove each before it reaches a public commit; a pushed commit cannot be unpublished.',
+  const list = deny.length ? `denylist: ${plural(deny.length, 'name')}` : 'no denylist'
+  notice(
+    `${plural(hits.length, 'hit')} (${mode}; ${list}). Remove each before it reaches a public ` +
+      'commit; a pushed commit cannot be unpublished.',
   )
+  if (hits.some((hit) => hit.kind === 'denylist'))
+    notice(
+      'a denylist name that is public after all: add it to privacyAllow in ~/.devdash/config.json',
+    )
   return 1
 }
 

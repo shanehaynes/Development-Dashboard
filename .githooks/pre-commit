@@ -7,9 +7,9 @@ node "$guard" --staged </dev/null
 status=$?
 [ "$status" -eq 0 ] && exit 0
 if [ "${DEVDASH_ALLOW:-}" = 1 ]; then
-  echo "privacy-guard: BYPASSED by DEVDASH_ALLOW=1. Committing anyway; CI re-scans every PR, but without the denylist." >&2
+  echo "privacy-guard: BYPASSED by DEVDASH_ALLOW=1. Committing anyway; the gate and CI ignore it, and CI has no denylist." >&2
   exit 0
 fi
 [ "$status" -eq 127 ] && echo "privacy-guard: node not found on PATH." >&2
-echo "privacy-guard: commit refused. For a false positive only: DEVDASH_ALLOW=1 git commit … (CI re-scans every PR, without the denylist)." >&2
+echo "privacy-guard: commit refused. For a false positive only: DEVDASH_ALLOW=1 git commit … CI scans each PR again, but only after the push has published it, and without the denylist." >&2
 exit 1
