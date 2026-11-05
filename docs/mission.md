@@ -41,7 +41,7 @@ _Test:_ Can polling fail a session's commit, or change a byte in any repo?
 
 ### 3. Commit nothing private.
 
-The repo is private (Shane, 2026-11-03) and still commits only code, its own docs and curated lessons. Repos are discovered at runtime. No repo list, local path, session name or registry content enters git. Lanes render synthetic fixtures, so their screenshots show no real data.
+The repo is public (Shane, 2026-11-05; private from 2026-11-03 until then) and commits only code, its own docs and curated lessons; a guard refuses commits and pushes that carry anything else. Repos are discovered at runtime. No repo list, local path, session name or registry content enters git. Lanes render synthetic fixtures, so their screenshots show no real data.
 
 _Test:_ Does `git grep` find a home-directory path or a list of Shane's repos?
 
