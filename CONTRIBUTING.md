@@ -76,7 +76,7 @@ From phase 2, `node contract/lint.mjs` will check all of this inside `npm run ch
 - Never edit a vendored copy. Its `VENDORED` stamp and that repo's CI re-vendor guard exist to refuse it.
 - Until every adopted repo re-vendors, versions differ. The dashboard footer and the session-start notice (phase 8) will show contract vs vendored version; lint W07 flags a newer contract.
 
-## 7. Fixtures and `DEVDASH_REAL`
+## 7. Fixtures, `DEVDASH_REAL` and the privacy guard
 
 **How it fails.** A lane that points its server at Shane's real repos does two kinds of damage. It polls other sessions' worktrees from code that is unfinished by definition, and the lock discipline of section 2 is exactly what unfinished code may lack. And everything it renders (screenshots, test snapshots, a PR description) carries real repo names, session names and paths into commits and PRs, where they outlive the lane.
 
@@ -85,7 +85,16 @@ From phase 2, `node contract/lint.mjs` will check all of this inside `npm run ch
 - A lane's server never writes the real `~/.devdash/`: no acks, no cache.
 - Tests build real git repos in a temp dir (`tests/helpers/tmpRepo.ts`, phase 1) with `ps` and `gh` injected. No test sets `DEVDASH_REAL` or reads `~/.claude`, `~/.devdash` or a discovery root.
 - Fixture names are invented. A real repo name (apex-training and assignment-tracker aside), a local path or a session name in a fixture, snapshot or screenshot is a bug.
-- Nothing mechanizes this at day 0: a lane that types `npm start` is not stopped.
+- Not mechanized: a lane that types `npm start` is not stopped; the privacy guard below refuses the patterns it knows in what that lane would commit.
+
+**How a leak gets out.** Agents read real paths, session names and repo names all day and write commits, PR bodies and lessons in the same breath. In a public repo a pushed commit is copied into every clone and fork, and a PR's commits stay on GitHub after its branch is deleted; a later commit that removes the text unpublishes nothing. A squash merge turns the PR title and body into the commit message on `main`.
+
+- `scripts/privacy-guard.mjs` refuses home-directory paths, also JSON-escaped, URL-encoded and in Claude's `-Users-<name>-…` folder names; emails other than `*@example.invalid` (or `.com`, `.org`, `.net`, and their subdomains), `*@users.noreply.github.com`, `noreply@anthropic.com`, `noreply@github.com` and `git@github.com`; UUIDs outside `fixtures/` and `tests/`; GitHub owners other than shanehaynes, actions and github, in github.com, gist, raw, api and github.io links; images, video and PDFs outside `fixtures/shots/`, by extension or by content; file names with a control character or invalid UTF-8; and what it cannot read: files over 2 MB (lockfiles are read whole) and compressed archives. Other binaries are scanned as strings. `fixtures/shots/` is trusted: only text and metadata in it are checked, so a real screenshot saved there passes.
+- On Shane's machine it also refuses a denylist built at run time and matched whole, ignoring case: repo names under the discovery roots, their origin slugs, private repos from `gh` (cached 24 h in `~/.devdash/cache/privacy-denylist.json`, the guard's only write) and session names. A single word counts only as a path segment. The list is never committed or printed; a hit shows its first 3 characters, inside a file name too. A name that is public after all goes in `privacyAllow` in `~/.devdash/config.json`. `DEVDASH_DENYLIST_FILE` replaces the list, for tests, and the guard says so.
+- The pre-commit hook scans staged files. The pre-push hook scans every new commit's message, author, committer and files, merges included, so a hit removed by a later commit still counts; with no `origin/main` it scans the branch's whole history. It also scans tag messages and the pushed ref names. `scripts/install-githooks.sh` sets `core.hooksPath=.githooks` for all worktrees; `.claude/lane-setup.sh` runs it.
+- `npm run check` ends with `--all`. CI scans each PR's commits, branch name, title and body (the squash commit's message) with the base branch's copy of the guard, so a PR cannot loosen the check that judges it, and does so even when earlier steps fail. After a merge it scans the commits pushed to `main`: that catches a message edited in the merge dialog, but cannot unpublish it.
+- A hit: remove it; if it is already committed, amend or rebase before you push. `DEVDASH_ALLOW=1 git commit …` (or `git push …`) passes a hook with a notice, for a false positive only; the gate and CI ignore it, so a generic false positive gets reworded anyway.
+- Not mechanized: `git commit --no-verify` and a clone without the hooks path skip the hooks; a lane runs its own copy of the guard and hooks, so only CI's base-branch copy holds against an edit to them; CI has no denylist and runs only after the push has published the branch; a pattern scan cannot judge meaning, and text split across lines or disguised beyond the forms above gets through.
 
 ## 8. Lessons
 
@@ -100,18 +109,18 @@ From phase 2, `node contract/lint.mjs` will check all of this inside `npm run ch
 
 ## 9. Merging
 
-**How it fails.** Two PRs each green against `main` can be red together: one tightens a rule, the other adds what it rejects. Merged in parallel, they break `main` with no PR at fault. An agent merging into a held path changes how every session works without Shane seeing it. Today nothing on GitHub stops either: branch protection is not applied.
+**How it fails.** Two PRs each green against `main` can be red together: one tightens a rule, the other adds what it rejects. Merged in parallel, they break `main` with no PR at fault. An agent merging into a held path changes how every session works without Shane seeing it. GitHub stops the first: `main` takes only a green `check` on an up-to-date branch. Only convention stops the second.
 
 - A lane commits, pushes its branch and reports; the orchestrator opens the PR and merges. Squash only. Every PR is based on `main`; never stack.
 - Merge serially: after each merge, the next PR runs `git merge origin/main && git push` and waits for a green `check`.
 - Before several PRs open at once, prove they combine: `bash .claude/skills/parallel-agents/scripts/combine-check.sh --check "npm ci && npm run check" <branch> <branch> …`. The fold proves what the command runs and nothing more.
 - Held for Shane, never merged by an agent: `.github/`, `.claude/settings.json`, `.claude/skills/`, `package.json` dependencies, `docs/mission.md`. In adopted repos the vendored `dev-dashboard` copy is held too.
-- Set on GitHub: squash only, squash commit from the PR title and body, branch-update suggestions, auto-delete of merged branches. Not set: branch protection (required `check`, up to date, linear history, no force pushes or deletions, admins included). GitHub refuses it on this private repo on the current plan (HTTP 403). Shane has not yet chosen: GitHub Pro, a public repo with guards, or convention only ([merge settings](docs/decisions/2026-11-04-merge-settings.md)). Until he does, the bullets above are convention, not enforcement.
+- Set on GitHub (2026-11-05): squash only, squash commit from the PR title and body, branch-update suggestions, auto-delete of merged branches, and protection on `main`: required `check`, up to date, linear history, no force pushes or deletions, admins included, zero required reviews ([merge settings](docs/decisions/2026-11-04-merge-settings.md)). The repo is public ([visibility](docs/decisions/2026-11-05-visibility-public.md)), which is what made protection available on the account's plan.
 
 ## 10. What will go wrong first (predicted)
 
 Nothing has gone wrong yet; the project is at day 0. This is the incident the rules above predict.
 
-A lane building the registry reader wants real sessions to test against, so it runs `npm start`. Its poller calls `git status` without `--no-optional-locks`. In another repo a session runs `git commit` mid-poll and fails on `index.lock`. It follows git's advice and deletes the lock, which is safe only when no other git process holds it; one does, and two processes now write that repo's index. Meanwhile the lane screenshots its board for the PR. The image and the PR text show a private repo's name and three session names. The repo is private, so nobody objects. Then the PR text becomes a lesson, the lesson is promoted into a skill source, and the skill is vendored into a public repo.
+A lane building the registry reader wants real sessions to test against, so it runs `npm start`. Its poller calls `git status` without `--no-optional-locks`. In another repo a session runs `git commit` mid-poll and fails on `index.lock`. It follows git's advice and deletes the lock, which is safe only when no other git process holds it; one does, and two processes now write that repo's index. Meanwhile the lane screenshots its board for the PR. The image and the PR text show a private repo's name and three session names. The lane commits with `--no-verify` to get past the hook, and CI's scan fires only after the push has published the branch. Then the PR text becomes a lesson, the lesson is promoted into a skill source, and the skill is vendored into a public repo.
 
 Sections 1, 2, 7 and 8 each cut one link of that chain.

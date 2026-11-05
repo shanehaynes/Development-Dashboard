@@ -22,10 +22,11 @@ The first option:
 
 Read back through `gh api` on 2026-11-04: the first two bullets are applied; the third is not. GitHub refuses branch protection and rulesets on this private repo on the account's current plan (HTTP 403: "Upgrade to GitHub Pro or make this repository public"). The way forward is Shane's call: GitHub Pro, a public repo (which reopens [visibility](2026-11-04-visibility.md)), or the third bullet as convention only. Until he decides, nothing on GitHub enforces it; it binds sessions as a rule, not a mechanism.
 
+2026-11-05: Shane chose a public repository ([visibility](2026-11-05-visibility-public.md)); after the flip the third bullet was applied and read back: required check `check`, strict, linear history, force pushes and deletions blocked, zero required reviews, enforced for admins.
+
 Held for Shane, never merged by an agent: `.github/`, `.claude/settings.json`, `.claude/skills/`, `package.json` dependencies. `LESSONS.md` changes only by curation PR.
 
 ## Revisit when
 
-- Shane decides on branch protection: apply it with `PUT /repos/shanehaynes/Development-Dashboard/branches/main/protection` and record the date here.
 - Fleets of 10+ PRs become routine: drop the up-to-date rule only if the parallel-agents combine check runs before every batch.
 - The repo moves to an organization: a merge queue replaces the serial loop, and CI gains a `merge_group` trigger.

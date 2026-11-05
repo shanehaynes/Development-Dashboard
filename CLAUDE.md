@@ -29,12 +29,13 @@ More than one Claude session may work in this repo at once, and none can see ano
 | Working tree, `node_modules`, `dist` | partition                     | one worktree per lane; `.claude/lane-setup.sh` runs `npm ci`                                                                                                |                                                                                                                                        |
 | Dev port                             | partition                     | `dev/port.ts` → `lane.sh port`; `strictPort`; `DEVDASH_PORT` overrides                                                                                      | primary 4400; lanes hashed into 5200–5999, on synthetic fixtures only                                                                  |
 | `.claude/state/` in the primary      | append-only                   | `claims.tsv` by `lane.sh` (`tidy` prunes it); `blocked.tsv` by `contract/blocked.sh` (phase 2)                                                              | gitignored; never edit by hand                                                                                                         |
-| `~/.devdash/`                        | dashboard-owned               | `config.json` (per machine, Shane edits it); `acks.tsv`, `cache/` (phase 4)                                                                                 | except `locks/chrome` (sessions, phase 2) and `heartbeat/` (session hooks, phase 8); lanes never write the real one                    |
+| `~/.devdash/`                        | dashboard-owned               | `config.json` (per machine, Shane edits it); `acks.tsv`, `cache/` (phase 4)                                                                                 | except `locks/chrome` (sessions, phase 2) and `heartbeat/` (session hooks, phase 8); lanes never write the real one (guard aside)      |
 | Shane's signed-in Chrome             | serialize, machine-wide       | `contract/chrome-lock.sh take\|release` (phase 2); until then, clear each task with the orchestrator                                                        | attended; one task at a time across every repo                                                                                         |
-| Other repos, `~/.claude`             | external, read-only           | `execFile` argv, read-only git allowlist, `GIT_OPTIONAL_LOCKS=0` (phase 1)                                                                                  | never written, never fetched; lanes never read them. Phase 8's `install-hook.mjs` is Shane's to run                                    |
+| Other repos, `~/.claude`             | external, read-only           | `execFile` argv, read-only git allowlist, `GIT_OPTIONAL_LOCKS=0` (phase 1)                                                                                  | never written, never fetched; lanes never read them (privacy guard aside). Phase 8's `install-hook.mjs` is Shane's to run              |
 | GitHub API quota                     | external, shared              | background `gh` refresh (phase 1): open PRs 120 s, merged 5 min, terminal states cached                                                                     | one token for every session on the Mac; `gh` down reads unknown, never none                                                            |
 | `fixtures/out/`                      | partition                     | gitignored; `npm run fixtures` regenerates it                                                                                                               | synthetic repos only; never hand-edited                                                                                                |
 | Gate-protected paths                 | orchestrator-owned            | `tests/**`, `*.test.*`, `fixtures/generate.mjs`, `vite.config.ts`, `tsconfig*.json`, `.oxlintrc.json`, `.prettier*`, `.github/`, `.claude/`, `package.json` | a lane adds tests for its own code; anything else here only when its brief assigns it. A lane that believes a test is wrong reports it |
+| Privacy guard                        | orchestrator-owned, held      | `scripts/privacy-guard.mjs`, `scripts/install-githooks.sh`, `.githooks/`                                                                                    | gate-protected; reads repo names, origin URLs, session names; writes only `~/.devdash/cache/privacy-denylist.json`                     |
 | `docs/roadmap.md`                    | hot file                      | tick and add steps only inside your claimed item                                                                                                            |                                                                                                                                        |
 | `docs/backlog.md`                    | hot file                      | append-only, one line per entry (`merge=union`)                                                                                                             | removals only in a cleanup PR                                                                                                          |
 | `CLAUDE.md`, `package-lock.json`     | hot file                      | small edits, reason in the PR                                                                                                                               | the lockfile moves only with a held dependency change                                                                                  |
@@ -46,26 +47,28 @@ More than one Claude session may work in this repo at once, and none can see ano
 ## Gate
 
 ```bash
-npm run check   # tsc -b && vitest run && oxlint && prettier --check . — parallel-safe; every lane runs it; CI runs it
+npm run check   # tsc -b && vitest run && oxlint && prettier --check . && node scripts/privacy-guard.mjs --all — parallel-safe; every lane runs it; CI runs it
 ```
 
 Phase 2 appends `&& node contract/lint.mjs`. Not in the gate: `npm start` against real data (primary only, by the orchestrator or Shane). CI does not cover: a real browser, real repos.
 
 ## Environments and secrets
 
-No secrets, no `.env`, no database. `~/.devdash/config.json` is per machine (discovery roots, mute list): never committed, never copied into a checkout. Deploy: none, so no version endpoint; Vite binds `127.0.0.1` only.
+No secrets, no `.env`, no database. `~/.devdash/config.json` is per machine (discovery roots, mute list, `privacyAllow`): never committed, never copied into a checkout. Deploy: none, so no version endpoint; Vite binds `127.0.0.1` only.
 
 ## Privacy
 
-The repo is private; commits still carry nothing private: no absolute local paths, session names, registry contents, or names of Shane's repos beyond apex-training and assignment-tracker (both public). Repos are discovered at runtime; no committed file lists them. Fixtures, snapshots and screenshots use invented names.
+Commits, PR titles and bodies, and branch and tag names carry nothing private: no absolute local paths, session names, registry contents, or names of Shane's repos beyond apex-training and assignment-tracker (both public). Repos are discovered at runtime; no committed file lists them. Fixtures, snapshots and screenshots use invented names.
+
+`scripts/privacy-guard.mjs` enforces this; what it refuses is in [CONTRIBUTING.md](CONTRIBUTING.md) §7. Hooks in `.githooks/` run it before every commit and push (`scripts/install-githooks.sh` sets `core.hooksPath` for all worktrees; `.claude/lane-setup.sh` runs it). `npm run check` ends with `--all`. CI scans each PR with the base branch's copy of the guard, and every push to `main`. A false positive: `DEVDASH_ALLOW=1` passes a hook with a notice, which the gate and CI ignore; a denylist name that is public goes in `privacyAllow` in `~/.devdash/config.json`. Limits: `--no-verify` and a clone without the hooks path skip the hooks; CI has no denylist and runs after the push has published the branch; a pattern scan cannot judge meaning.
 
 ## Merging
 
 Squash-merge only; the squash commit takes the PR title and body. Merge serially: after each merge the next PR runs `git merge origin/main && git push` and waits for a green `check`. Every PR is based on `main` — never stack. Before opening several PRs at once, prove they combine (parallel-agents' combine check, with the gate).
 
-Branch protection is not applied: GitHub refuses it on this private repo on the current plan (HTTP 403). Shane has not chosen yet: GitHub Pro, a public repo with guards, or convention only (the open `**Shane (decide):**` box in `day-0`; [merge settings](docs/decisions/2026-11-04-merge-settings.md)). Until he does, nothing on GitHub stops a red or stale merge; these rules bind by convention.
+Branch protection is applied (2026-11-05): `main` requires the `check` job on an up-to-date branch, linear history, no force pushes or deletions, enforced for admins, zero required reviews ([merge settings](docs/decisions/2026-11-04-merge-settings.md)). The repo is public ([visibility](docs/decisions/2026-11-05-visibility-public.md)); the Privacy section says what keeps it safe.
 
-Held for Shane (never merged by an agent): `.github/`, `.claude/settings.json`, `.claude/skills/`, `package.json` dependencies, `docs/mission.md` (only Shane amends it).
+Held for Shane (never merged by an agent): `.github/`, `.claude/settings.json`, `.claude/skills/`, `package.json` dependencies, `scripts/privacy-guard.mjs`, `.githooks/`, `docs/mission.md` (only Shane amends it).
 
 ## The development dashboard reads this repo
 

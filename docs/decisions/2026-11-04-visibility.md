@@ -1,6 +1,6 @@
 # The repository is private
 
-Date: 2026-11-04 · Status: accepted
+Date: 2026-11-04 · Status: superseded by [2026-11-05-visibility-public.md](2026-11-05-visibility-public.md)
 
 ## Context
 

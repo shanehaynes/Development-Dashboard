@@ -29,3 +29,39 @@ jobs:
             echo "::error::.claude/skills/parallel-agents/ was edited by hand. Change the skill at its source and re-vendor."
             printf '%s\n' "$changed"; exit 1
           fi
+      - name: No private data in the PR's commits, files, branch, title or body
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          # The base branch's guard judges the PR, so a PR cannot loosen the check that judges it.
+          git fetch --no-tags --quiet --depth=1 origin "$GITHUB_BASE_REF"
+          base=$(git rev-parse FETCH_HEAD)
+          guard="$RUNNER_TEMP/privacy-guard.mjs"
+          git show "$base:scripts/privacy-guard.mjs" >"$guard" 2>/dev/null ||
+            cp scripts/privacy-guard.mjs "$guard"
+          # The checkout is one commit deep: fetch the PR's history so every commit is scanned.
+          if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+            git fetch --no-tags --quiet --no-write-fetch-head --unshallow origin "$GITHUB_REF"
+          fi
+          status=0
+          node "$guard" --range "$base..HEAD" || status=1
+          printf '%s\n\n%s\n\n%s\n' "$HEAD_REF" "$PR_TITLE" "$PR_BODY" |
+            node "$guard" --stdin 'PR branch, title and body' || status=1
+          exit "$status"
+      - name: No private data in the commits pushed to main
+        # Detects only: these commits are already public. Catches a squash message edited after CI.
+        if: ${{ !cancelled() && github.event_name == 'push' }}
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+            git fetch --no-tags --quiet --no-write-fetch-head --unshallow origin "$GITHUB_REF"
+          fi
+          if git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            node scripts/privacy-guard.mjs --range "$BEFORE..$GITHUB_SHA"
+          else
+            node scripts/privacy-guard.mjs --history "$GITHUB_SHA"
+          fi

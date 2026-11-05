@@ -13,7 +13,7 @@
     "lint": "oxlint",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "tsc -b && vitest run && oxlint && prettier --check .",
+    "check": "tsc -b && vitest run && oxlint && prettier --check . && node scripts/privacy-guard.mjs --all",
     "fixtures": "node fixtures/generate.mjs"
   },
   "dependencies": {
