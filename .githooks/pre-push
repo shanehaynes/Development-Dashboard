@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Refuses a push whose new commits carry private data in messages or files
+# (scripts/privacy-guard.mjs --range). Installed by scripts/install-githooks.sh.
+set -u
+guard="$(cd "$(dirname "$0")/.." && pwd -P)/scripts/privacy-guard.mjs"
+nonzero() { case "$1" in *[!0]*) return 0 ;; *) return 1 ;; esac; }
+status=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ -n "${local_sha:-}" ] && nonzero "$local_sha" || continue # a deletion pushes no content
+  if nonzero "${remote_sha:-0}" && git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+    node "$guard" --range "$remote_sha..$local_sha" </dev/null || status=1
+  elif git rev-parse --verify --quiet 'origin/main^{commit}' >/dev/null; then
+    node "$guard" --range "origin/main..$local_sha" </dev/null || status=1
+  else
+    node "$guard" --all </dev/null || status=1
+  fi
+done
+[ "$status" -eq 0 ] && exit 0
+if [ "${DEVDASH_ALLOW:-}" = 1 ]; then
+  echo "privacy-guard: BYPASSED by DEVDASH_ALLOW=1. Pushing anyway; CI re-scans every PR, but without the denylist." >&2
+  exit 0
+fi
+echo "privacy-guard: push refused. Rewrite the commits that carry a hit. For a false positive only: DEVDASH_ALLOW=1 git push … (CI re-scans every PR, without the denylist)." >&2
+exit 1

@@ -29,3 +29,19 @@ jobs:
             echo "::error::.claude/skills/parallel-agents/ was edited by hand. Change the skill at its source and re-vendor."
             printf '%s\n' "$changed"; exit 1
           fi
+      - name: No private data in the PR's commits, files, title or body
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          # The checkout is one commit deep: fetch the PR's history so its commit messages are
+          # scanned too. FETCH_HEAD stays the base fetched by the step above.
+          if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+            git fetch --no-tags --quiet --no-write-fetch-head --unshallow origin "$GITHUB_REF"
+          fi
+          status=0
+          node scripts/privacy-guard.mjs --range FETCH_HEAD..HEAD || status=1
+          printf '%s\n\n%s\n' "$PR_TITLE" "$PR_BODY" |
+            node scripts/privacy-guard.mjs --stdin 'PR title and body' || status=1
+          exit "$status"

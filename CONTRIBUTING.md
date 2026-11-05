@@ -76,7 +76,7 @@ From phase 2, `node contract/lint.mjs` will check all of this inside `npm run ch
 - Never edit a vendored copy. Its `VENDORED` stamp and that repo's CI re-vendor guard exist to refuse it.
 - Until every adopted repo re-vendors, versions differ. The dashboard footer and the session-start notice (phase 8) will show contract vs vendored version; lint W07 flags a newer contract.
 
-## 7. Fixtures and `DEVDASH_REAL`
+## 7. Fixtures, `DEVDASH_REAL` and the privacy guard
 
 **How it fails.** A lane that points its server at Shane's real repos does two kinds of damage. It polls other sessions' worktrees from code that is unfinished by definition, and the lock discipline of section 2 is exactly what unfinished code may lack. And everything it renders (screenshots, test snapshots, a PR description) carries real repo names, session names and paths into commits and PRs, where they outlive the lane.
 
@@ -85,7 +85,15 @@ From phase 2, `node contract/lint.mjs` will check all of this inside `npm run ch
 - A lane's server never writes the real `~/.devdash/`: no acks, no cache.
 - Tests build real git repos in a temp dir (`tests/helpers/tmpRepo.ts`, phase 1) with `ps` and `gh` injected. No test sets `DEVDASH_REAL` or reads `~/.claude`, `~/.devdash` or a discovery root.
 - Fixture names are invented. A real repo name (apex-training and assignment-tracker aside), a local path or a session name in a fixture, snapshot or screenshot is a bug.
-- Nothing mechanizes this at day 0: a lane that types `npm start` is not stopped.
+- Not mechanized: a lane that types `npm start` is not stopped; the privacy guard below stops what it would commit.
+
+**How a leak gets out.** Agents read real paths, session names and repo names all day and write commits, PR bodies and lessons in the same breath. In a public repo a pushed commit is copied into every clone and fork, and a PR's commits stay on GitHub after its branch is deleted; a later commit that removes the text unpublishes nothing. A squash merge turns the PR title and body into the commit message on `main`.
+
+- `scripts/privacy-guard.mjs` refuses home-directory paths, emails other than `*@example.invalid`, `*@users.noreply.github.com` and `noreply@anthropic.com`, UUIDs outside `fixtures/` and `tests/`, github.com owners other than shanehaynes, actions and github, and images outside `fixtures/shots/`. On Shane's machine it also refuses a denylist built at run time: repo names under the discovery roots, their origin slugs, private repos from `gh` (cached 24 h in `~/.devdash/cache/`) and session names. The list is never committed or printed; a hit shows its first 3 characters.
+- The pre-commit hook scans staged files; the pre-push hook scans every new commit's message and files, so a hit removed by a later commit still counts. `scripts/install-githooks.sh` sets `core.hooksPath=.githooks` for all worktrees; `.claude/lane-setup.sh` runs it.
+- `npm run check` ends with `--all`. CI scans each PR's commits (`--range FETCH_HEAD..HEAD`) and its title and body (`--stdin`), which become the squash commit.
+- A hit: remove it; if it is already committed, amend or rebase before you push. `DEVDASH_ALLOW=1 git commit …` (or `git push …`) passes a hook with a notice, for a false positive only; the gate and CI ignore it, so a generic false positive gets reworded anyway.
+- Not mechanized: `git commit --no-verify` and a clone without the hooks path skip the hooks, and CI checks generic patterns only, with no denylist. A pattern scan cannot judge meaning.
 
 ## 8. Lessons
 
